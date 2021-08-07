@@ -12,7 +12,10 @@ module.exports = /******/ (function(modules) {
       resolves = [];
     /******/ for (; i < chunkIds.length; i++) {
       /******/ chunkId = chunkIds[i];
-      /******/ if (installedChunks[chunkId]) {
+      /******/ if (
+        Object.prototype.hasOwnProperty.call(installedChunks, chunkId) &&
+        installedChunks[chunkId]
+      ) {
         /******/ resolves.push(installedChunks[chunkId][0]);
         /******/
       }
@@ -301,6 +304,69 @@ module.exports = /******/ (function(modules) {
       /***/
     },
 
+    /***/ "02f4": /***/ function(module, exports, __webpack_require__) {
+      var toInteger = __webpack_require__("4588");
+      var defined = __webpack_require__("be13");
+      // true  -> String#at
+      // false -> String#codePointAt
+      module.exports = function(TO_STRING) {
+        return function(that, pos) {
+          var s = String(defined(that));
+          var i = toInteger(pos);
+          var l = s.length;
+          var a, b;
+          if (i < 0 || i >= l) return TO_STRING ? "" : undefined;
+          a = s.charCodeAt(i);
+          return a < 0xd800 ||
+            a > 0xdbff ||
+            i + 1 === l ||
+            (b = s.charCodeAt(i + 1)) < 0xdc00 ||
+            b > 0xdfff
+            ? TO_STRING
+              ? s.charAt(i)
+              : a
+            : TO_STRING
+            ? s.slice(i, i + 2)
+            : ((a - 0xd800) << 10) + (b - 0xdc00) + 0x10000;
+        };
+      };
+
+      /***/
+    },
+
+    /***/ "0390": /***/ function(module, exports, __webpack_require__) {
+      "use strict";
+
+      var at = __webpack_require__("02f4")(true);
+
+      // `AdvanceStringIndex` abstract operation
+      // https://tc39.github.io/ecma262/#sec-advancestringindex
+      module.exports = function(S, index, unicode) {
+        return index + (unicode ? at(S, index).length : 1);
+      };
+
+      /***/
+    },
+
+    /***/ "0bfb": /***/ function(module, exports, __webpack_require__) {
+      "use strict";
+
+      // 21.2.5.3 get RegExp.prototype.flags
+      var anObject = __webpack_require__("cb7c");
+      module.exports = function() {
+        var that = anObject(this);
+        var result = "";
+        if (that.global) result += "g";
+        if (that.ignoreCase) result += "i";
+        if (that.multiline) result += "m";
+        if (that.unicode) result += "u";
+        if (that.sticky) result += "y";
+        return result;
+      };
+
+      /***/
+    },
+
     /***/ "0d58": /***/ function(module, exports, __webpack_require__) {
       // 19.1.2.14 / 15.2.3.14 Object.keys(O)
       var $keys = __webpack_require__("ce10");
@@ -474,26 +540,108 @@ module.exports = /******/ (function(modules) {
     /***/ "214f": /***/ function(module, exports, __webpack_require__) {
       "use strict";
 
-      var hide = __webpack_require__("32e9");
+      __webpack_require__("b0c5");
       var redefine = __webpack_require__("2aba");
+      var hide = __webpack_require__("32e9");
       var fails = __webpack_require__("79e5");
       var defined = __webpack_require__("be13");
       var wks = __webpack_require__("2b4c");
+      var regexpExec = __webpack_require__("520a");
+
+      var SPECIES = wks("species");
+
+      var REPLACE_SUPPORTS_NAMED_GROUPS = !fails(function() {
+        // #replace needs built-in support for named groups.
+        // #match works fine because it just return the exec results, even if it has
+        // a "grops" property.
+        var re = /./;
+        re.exec = function() {
+          var result = [];
+          result.groups = { a: "7" };
+          return result;
+        };
+        return "".replace(re, "$<a>") !== "7";
+      });
+
+      var SPLIT_WORKS_WITH_OVERWRITTEN_EXEC = (function() {
+        // Chrome 51 has a buggy "split" implementation when RegExp#exec !== nativeExec
+        var re = /(?:)/;
+        var originalExec = re.exec;
+        re.exec = function() {
+          return originalExec.apply(this, arguments);
+        };
+        var result = "ab".split(re);
+        return result.length === 2 && result[0] === "a" && result[1] === "b";
+      })();
 
       module.exports = function(KEY, length, exec) {
         var SYMBOL = wks(KEY);
-        var fns = exec(defined, SYMBOL, ""[KEY]);
-        var strfn = fns[0];
-        var rxfn = fns[1];
+
+        var DELEGATES_TO_SYMBOL = !fails(function() {
+          // String methods call symbol-named RegEp methods
+          var O = {};
+          O[SYMBOL] = function() {
+            return 7;
+          };
+          return ""[KEY](O) != 7;
+        });
+
+        var DELEGATES_TO_EXEC = DELEGATES_TO_SYMBOL
+          ? !fails(function() {
+              // Symbol-named RegExp methods call .exec
+              var execCalled = false;
+              var re = /a/;
+              re.exec = function() {
+                execCalled = true;
+                return null;
+              };
+              if (KEY === "split") {
+                // RegExp[@@split] doesn't call the regex's exec method, but first creates
+                // a new one. We need to return the patched regex when creating the new one.
+                re.constructor = {};
+                re.constructor[SPECIES] = function() {
+                  return re;
+                };
+              }
+              re[SYMBOL]("");
+              return !execCalled;
+            })
+          : undefined;
+
         if (
-          fails(function() {
-            var O = {};
-            O[SYMBOL] = function() {
-              return 7;
-            };
-            return ""[KEY](O) != 7;
-          })
+          !DELEGATES_TO_SYMBOL ||
+          !DELEGATES_TO_EXEC ||
+          (KEY === "replace" && !REPLACE_SUPPORTS_NAMED_GROUPS) ||
+          (KEY === "split" && !SPLIT_WORKS_WITH_OVERWRITTEN_EXEC)
         ) {
+          var nativeRegExpMethod = /./[SYMBOL];
+          var fns = exec(defined, SYMBOL, ""[KEY], function maybeCallNative(
+            nativeMethod,
+            regexp,
+            str,
+            arg2,
+            forceStringMethod
+          ) {
+            if (regexp.exec === regexpExec) {
+              if (DELEGATES_TO_SYMBOL && !forceStringMethod) {
+                // The native String method already delegates to @@method (this
+                // polyfilled function), leasing to infinite recursion.
+                // We avoid it by directly calling the native @@method method.
+                return {
+                  done: true,
+                  value: nativeRegExpMethod.call(regexp, str, arg2)
+                };
+              }
+              return {
+                done: true,
+                value: nativeMethod.call(str, regexp, arg2)
+              };
+            }
+            return { done: false };
+          });
+          var strfn = fns[0];
+          var rxfn = fns[1];
+
           redefine(String.prototype, KEY, strfn);
           hide(
             RegExp.prototype,
@@ -560,18 +708,24 @@ module.exports = /******/ (function(modules) {
         return it === undefined
           ? "Undefined"
           : it === null
-            ? "Null"
-            : // @@toStringTag case
-              typeof (T = tryGet((O = Object(it)), TAG)) == "string"
-              ? T
-              : // builtinTag case
-                ARG
-                ? cof(O)
-                : // ES3 arguments fallback
-                  (B = cof(O)) == "Object" && typeof O.callee == "function"
-                  ? "Arguments"
-                  : B;
+          ? "Null"
+          : // @@toStringTag case
+          typeof (T = tryGet((O = Object(it)), TAG)) == "string"
+          ? T
+          : // builtinTag case
+          ARG
+          ? cof(O)
+          : // ES3 arguments fallback
+          (B = cof(O)) == "Object" && typeof O.callee == "function"
+          ? "Arguments"
+          : B;
       };
+
+      /***/
+    },
+
+    /***/ "2621": /***/ function(module, exports) {
+      exports.f = Object.getOwnPropertySymbols;
 
       /***/
     },
@@ -591,15 +745,36 @@ module.exports = /******/ (function(modules) {
     },
 
     /***/ "28a5": /***/ function(module, exports, __webpack_require__) {
+      "use strict";
+
+      var isRegExp = __webpack_require__("aae3");
+      var anObject = __webpack_require__("cb7c");
+      var speciesConstructor = __webpack_require__("ebd6");
+      var advanceStringIndex = __webpack_require__("0390");
+      var toLength = __webpack_require__("9def");
+      var callRegExpExec = __webpack_require__("5f1b");
+      var regexpExec = __webpack_require__("520a");
+      var fails = __webpack_require__("79e5");
+      var $min = Math.min;
+      var $push = [].push;
+      var $SPLIT = "split";
+      var LENGTH = "length";
+      var LAST_INDEX = "lastIndex";
+      var MAX_UINT32 = 0xffffffff;
+
+      // babel-minify transpiles RegExp('x', 'y') -> /x/y and it causes SyntaxError
+      var SUPPORTS_Y = !fails(function() {
+        RegExp(MAX_UINT32, "y");
+      });
+
       // @@split logic
-      __webpack_require__("214f")("split", 2, function(defined, SPLIT, $split) {
-        "use strict";
-        var isRegExp = __webpack_require__("aae3");
-        var _split = $split;
-        var $push = [].push;
-        var $SPLIT = "split";
-        var LENGTH = "length";
-        var LAST_INDEX = "lastIndex";
+      __webpack_require__("214f")("split", 2, function(
+        defined,
+        SPLIT,
+        $split,
+        maybeCallNative
+      ) {
+        var internalSplit;
         if (
           "abbc"[$SPLIT](/(b)*/)[1] == "c" ||
           "test"[$SPLIT](/(?:)/, -1)[LENGTH] != 4 ||
@@ -608,14 +783,13 @@ module.exports = /******/ (function(modules) {
           "."[$SPLIT](/()()/)[LENGTH] > 1 ||
           ""[$SPLIT](/.?/)[LENGTH]
         ) {
-          var NPCG = /()??/.exec("")[1] === undefined; // nonparticipating capturing group
           // based on es5-shim implementation, need to rework it
-          $split = function(separator, limit) {
+          internalSplit = function(separator, limit) {
             var string = String(this);
             if (separator === undefined && limit === 0) return [];
             // If `separator` is not a regex, use native split
             if (!isRegExp(separator))
-              return _split.call(string, separator, limit);
+              return $split.call(string, separator, limit);
             var output = [];
             var flags =
               (separator.ignoreCase ? "i" : "") +
@@ -623,28 +797,14 @@ module.exports = /******/ (function(modules) {
               (separator.unicode ? "u" : "") +
               (separator.sticky ? "y" : "");
             var lastLastIndex = 0;
-            var splitLimit = limit === undefined ? 4294967295 : limit >>> 0;
+            var splitLimit = limit === undefined ? MAX_UINT32 : limit >>> 0;
             // Make `global` and avoid `lastIndex` issues by working with a copy
             var separatorCopy = new RegExp(separator.source, flags + "g");
-            var separator2, match, lastIndex, lastLength, i;
-            // Doesn't need flags gy, but they don't hurt
-            if (!NPCG)
-              separator2 = new RegExp(
-                "^" + separatorCopy.source + "$(?!\\s)",
-                flags
-              );
-            while ((match = separatorCopy.exec(string))) {
-              // `separatorCopy.lastIndex` is not reliable cross-browser
-              lastIndex = match.index + match[0][LENGTH];
+            var match, lastIndex, lastLength;
+            while ((match = regexpExec.call(separatorCopy, string))) {
+              lastIndex = separatorCopy[LAST_INDEX];
               if (lastIndex > lastLastIndex) {
                 output.push(string.slice(lastLastIndex, match.index));
-                // Fix browsers whose `exec` methods don't consistently return `undefined` for NPCG
-                // eslint-disable-next-line no-loop-func
-                if (!NPCG && match[LENGTH] > 1)
-                  match[0].replace(separator2, function() {
-                    for (i = 1; i < arguments[LENGTH] - 2; i++)
-                      if (arguments[i] === undefined) match[i] = undefined;
-                  });
                 if (match[LENGTH] > 1 && match.index < string[LENGTH])
                   $push.apply(output, match.slice(1));
                 lastLength = match[0][LENGTH];
@@ -663,22 +823,90 @@ module.exports = /******/ (function(modules) {
           };
           // Chakra, V8
         } else if ("0"[$SPLIT](undefined, 0)[LENGTH]) {
-          $split = function(separator, limit) {
+          internalSplit = function(separator, limit) {
             return separator === undefined && limit === 0
               ? []
-              : _split.call(this, separator, limit);
+              : $split.call(this, separator, limit);
           };
+        } else {
+          internalSplit = $split;
         }
-        // 21.1.3.17 String.prototype.split(separator, limit)
+
         return [
+          // `String.prototype.split` method
+          // https://tc39.github.io/ecma262/#sec-string.prototype.split
           function split(separator, limit) {
             var O = defined(this);
-            var fn = separator == undefined ? undefined : separator[SPLIT];
-            return fn !== undefined
-              ? fn.call(separator, O, limit)
-              : $split.call(String(O), separator, limit);
+            var splitter =
+              separator == undefined ? undefined : separator[SPLIT];
+            return splitter !== undefined
+              ? splitter.call(separator, O, limit)
+              : internalSplit.call(String(O), separator, limit);
           },
-          $split
+          // `RegExp.prototype[@@split]` method
+          // https://tc39.github.io/ecma262/#sec-regexp.prototype-@@split
+          //
+          // NOTE: This cannot be properly polyfilled in engines that don't support
+          // the 'y' flag.
+          function(regexp, limit) {
+            var res = maybeCallNative(
+              internalSplit,
+              regexp,
+              this,
+              limit,
+              internalSplit !== $split
+            );
+            if (res.done) return res.value;
+
+            var rx = anObject(regexp);
+            var S = String(this);
+            var C = speciesConstructor(rx, RegExp);
+
+            var unicodeMatching = rx.unicode;
+            var flags =
+              (rx.ignoreCase ? "i" : "") +
+              (rx.multiline ? "m" : "") +
+              (rx.unicode ? "u" : "") +
+              (SUPPORTS_Y ? "y" : "g");
+
+            // ^(? + rx + ) is needed, in combination with some S slicing, to
+            // simulate the 'y' flag.
+            var splitter = new C(
+              SUPPORTS_Y ? rx : "^(?:" + rx.source + ")",
+              flags
+            );
+            var lim = limit === undefined ? MAX_UINT32 : limit >>> 0;
+            if (lim === 0) return [];
+            if (S.length === 0)
+              return callRegExpExec(splitter, S) === null ? [S] : [];
+            var p = 0;
+            var q = 0;
+            var A = [];
+            while (q < S.length) {
+              splitter.lastIndex = SUPPORTS_Y ? q : 0;
+              var z = callRegExpExec(splitter, SUPPORTS_Y ? S : S.slice(q));
+              var e;
+              if (
+                z === null ||
+                (e = $min(
+                  toLength(splitter.lastIndex + (SUPPORTS_Y ? 0 : q)),
+                  S.length
+                )) === p
+              ) {
+                q = advanceStringIndex(S, q, unicodeMatching);
+              } else {
+                A.push(S.slice(p, q));
+                if (A.length === lim) return A;
+                for (var i = 1; i <= z.length - 1; i++) {
+                  A.push(z[i]);
+                  if (A.length === lim) return A;
+                }
+                q = p = e;
+              }
+            }
+            A.push(S.slice(p));
+            return A;
+          }
         ];
       });
 
@@ -690,8 +918,8 @@ module.exports = /******/ (function(modules) {
       var hide = __webpack_require__("32e9");
       var has = __webpack_require__("69a8");
       var SRC = __webpack_require__("ca5a")("src");
+      var $toString = __webpack_require__("fa5b");
       var TO_STRING = "toString";
-      var $toString = Function[TO_STRING];
       var TPL = ("" + $toString).split(TO_STRING);
 
       __webpack_require__("8378").inspectSource = function(it) {
@@ -1048,6 +1276,7 @@ module.exports = /******/ (function(modules) {
     },
 
     /***/ "504c": /***/ function(module, exports, __webpack_require__) {
+      var DESCRIPTORS = __webpack_require__("9e1e");
       var getKeys = __webpack_require__("0d58");
       var toIObject = __webpack_require__("6821");
       var isEnum = __webpack_require__("52a7").f;
@@ -1059,10 +1288,12 @@ module.exports = /******/ (function(modules) {
           var i = 0;
           var result = [];
           var key;
-          while (length > i)
-            if (isEnum.call(O, (key = keys[i++]))) {
+          while (length > i) {
+            key = keys[i++];
+            if (!DESCRIPTORS || isEnum.call(O, key)) {
               result.push(isEntries ? [key, O[key]] : O[key]);
             }
+          }
           return result;
         };
       };
@@ -1086,6 +1317,74 @@ module.exports = /******/ (function(modules) {
         }
         return true;
       };
+
+      /***/
+    },
+
+    /***/ "520a": /***/ function(module, exports, __webpack_require__) {
+      "use strict";
+
+      var regexpFlags = __webpack_require__("0bfb");
+
+      var nativeExec = RegExp.prototype.exec;
+      // This always refers to the native implementation, because the
+      // String#replace polyfill uses ./fix-regexp-well-known-symbol-logic.js,
+      // which loads this file before patching the method.
+      var nativeReplace = String.prototype.replace;
+
+      var patchedExec = nativeExec;
+
+      var LAST_INDEX = "lastIndex";
+
+      var UPDATES_LAST_INDEX_WRONG = (function() {
+        var re1 = /a/,
+          re2 = /b*/g;
+        nativeExec.call(re1, "a");
+        nativeExec.call(re2, "a");
+        return re1[LAST_INDEX] !== 0 || re2[LAST_INDEX] !== 0;
+      })();
+
+      // nonparticipating capturing group, copied from es5-shim's String#split patch.
+      var NPCG_INCLUDED = /()??/.exec("")[1] !== undefined;
+
+      var PATCH = UPDATES_LAST_INDEX_WRONG || NPCG_INCLUDED;
+
+      if (PATCH) {
+        patchedExec = function exec(str) {
+          var re = this;
+          var lastIndex, reCopy, match, i;
+
+          if (NPCG_INCLUDED) {
+            reCopy = new RegExp(
+              "^" + re.source + "$(?!\\s)",
+              regexpFlags.call(re)
+            );
+          }
+          if (UPDATES_LAST_INDEX_WRONG) lastIndex = re[LAST_INDEX];
+
+          match = nativeExec.call(re, str);
+
+          if (UPDATES_LAST_INDEX_WRONG && match) {
+            re[LAST_INDEX] = re.global
+              ? match.index + match[0].length
+              : lastIndex;
+          }
+          if (NPCG_INCLUDED && match && match.length > 1) {
+            // Fix browsers whose `exec` methods don't consistently return `undefined`
+            // for NPCG, like IE8. NOTE: This doesn' work for /(.?)?/
+            // eslint-disable-next-line no-loop-func
+            nativeReplace.call(match[0], reCopy, function() {
+              for (i = 1; i < arguments.length - 2; i++) {
+                if (arguments[i] === undefined) match[i] = undefined;
+              }
+            });
+          }
+
+          return match;
+        };
+      }
+
+      module.exports = patchedExec;
 
       /***/
     },
@@ -1432,7 +1731,7 @@ module.exports = /******/ (function(modules) {
       })("versions", []).push({
         version: core.version,
         mode: __webpack_require__("2d00") ? "pure" : "global",
-        copyright: "© 2018 Denis Pushkarev (zloirock.ru)"
+        copyright: "© 2019 Denis Pushkarev (zloirock.ru)"
       });
 
       /***/
@@ -1455,8 +1754,8 @@ module.exports = /******/ (function(modules) {
         var target = IS_GLOBAL
           ? global
           : IS_STATIC
-            ? global[name] || (global[name] = {})
-            : (global[name] || {})[PROTOTYPE];
+          ? global[name] || (global[name] = {})
+          : (global[name] || {})[PROTOTYPE];
         var exports = IS_GLOBAL ? core : core[name] || (core[name] = {});
         var expProto = exports[PROTOTYPE] || (exports[PROTOTYPE] = {});
         var key, own, out, exp;
@@ -1471,8 +1770,8 @@ module.exports = /******/ (function(modules) {
             IS_BIND && own
               ? ctx(out, global)
               : IS_PROTO && typeof out == "function"
-                ? ctx(Function.call, out)
-                : out;
+              ? ctx(Function.call, out)
+              : out;
           // extend global
           if (target) redefine(target, key, out, type & $export.U);
           // export
@@ -1573,6 +1872,34 @@ module.exports = /******/ (function(modules) {
           "Object",
           exp
         );
+      };
+
+      /***/
+    },
+
+    /***/ "5f1b": /***/ function(module, exports, __webpack_require__) {
+      "use strict";
+
+      var classof = __webpack_require__("23c6");
+      var builtinExec = RegExp.prototype.exec;
+
+      // `RegExpExec` abstract operation
+      // https://tc39.github.io/ecma262/#sec-regexpexec
+      module.exports = function(R, S) {
+        var exec = R.exec;
+        if (typeof exec === "function") {
+          var result = exec.call(R, S);
+          if (typeof result !== "object") {
+            throw new TypeError(
+              "RegExp exec method returned something other than an Object or null"
+            );
+          }
+          return result;
+        }
+        if (classof(R) !== "RegExp") {
+          throw new TypeError("RegExp#exec called on incompatible receiver");
+        }
+        return builtinExec.call(R, S);
       };
 
       /***/
@@ -1685,9 +2012,9 @@ module.exports = /******/ (function(modules) {
         typeof window != "undefined" && window.Math == Math
           ? window
           : typeof self != "undefined" && self.Math == Math
-            ? self
-            : // eslint-disable-next-line no-new-func
-              Function("return this")());
+          ? self
+          : // eslint-disable-next-line no-new-func
+            Function("return this")());
       if (typeof __g == "number") __g = global; // eslint-disable-line no-undef
 
       /***/
@@ -1832,7 +2159,7 @@ module.exports = /******/ (function(modules) {
     },
 
     /***/ "8378": /***/ function(module, exports) {
-      var core = (module.exports = { version: "2.5.7" });
+      var core = (module.exports = { version: "2.6.11" });
       if (typeof __e == "number") __e = core; // eslint-disable-line no-undef
 
       /***/
@@ -1926,6 +2253,33 @@ module.exports = /******/ (function(modules) {
       /***/
     },
 
+    /***/ "8e6e": /***/ function(module, exports, __webpack_require__) {
+      // https://github.com/tc39/proposal-object-getownpropertydescriptors
+      var $export = __webpack_require__("5ca1");
+      var ownKeys = __webpack_require__("990b");
+      var toIObject = __webpack_require__("6821");
+      var gOPD = __webpack_require__("11e9");
+      var createProperty = __webpack_require__("f1ae");
+
+      $export($export.S, "Object", {
+        getOwnPropertyDescriptors: function getOwnPropertyDescriptors(object) {
+          var O = toIObject(object);
+          var getDesc = gOPD.f;
+          var keys = ownKeys(O);
+          var result = {};
+          var i = 0;
+          var key, desc;
+          while (keys.length > i) {
+            desc = getDesc(O, (key = keys[i++]));
+            if (desc !== undefined) createProperty(result, key, desc);
+          }
+          return result;
+        }
+      });
+
+      /***/
+    },
+
     /***/ "9093": /***/ function(module, exports, __webpack_require__) {
       // 19.1.2.7 / 15.2.3.4 Object.getOwnPropertyNames(O)
       var $keys = __webpack_require__("ce10");
@@ -1938,6 +2292,23 @@ module.exports = /******/ (function(modules) {
         Object.getOwnPropertyNames ||
         function getOwnPropertyNames(O) {
           return $keys(O, hiddenKeys);
+        };
+
+      /***/
+    },
+
+    /***/ "990b": /***/ function(module, exports, __webpack_require__) {
+      // all object keys, includes non-enumerable and symbols
+      var gOPN = __webpack_require__("9093");
+      var gOPS = __webpack_require__("2621");
+      var anObject = __webpack_require__("cb7c");
+      var Reflect = __webpack_require__("7726").Reflect;
+      module.exports =
+        (Reflect && Reflect.ownKeys) ||
+        function ownKeys(it) {
+          var keys = gOPN.f(anObject(it));
+          var getSymbols = gOPS.f;
+          return getSymbols ? keys.concat(getSymbols(it)) : keys;
         };
 
       /***/
@@ -2051,16 +2422,35 @@ module.exports = /******/ (function(modules) {
     },
 
     /***/ a481: /***/ function(module, exports, __webpack_require__) {
+      "use strict";
+
+      var anObject = __webpack_require__("cb7c");
+      var toObject = __webpack_require__("4bf8");
+      var toLength = __webpack_require__("9def");
+      var toInteger = __webpack_require__("4588");
+      var advanceStringIndex = __webpack_require__("0390");
+      var regExpExec = __webpack_require__("5f1b");
+      var max = Math.max;
+      var min = Math.min;
+      var floor = Math.floor;
+      var SUBSTITUTION_SYMBOLS = /\$([$&`']|\d\d?|<[^>]*>)/g;
+      var SUBSTITUTION_SYMBOLS_NO_NAMED = /\$([$&`']|\d\d?)/g;
+
+      var maybeToString = function(it) {
+        return it === undefined ? it : String(it);
+      };
+
       // @@replace logic
       __webpack_require__("214f")("replace", 2, function(
         defined,
         REPLACE,
-        $replace
+        $replace,
+        maybeCallNative
       ) {
-        // 21.1.3.14 String.prototype.replace(searchValue, replaceValue)
         return [
+          // `String.prototype.replace` method
+          // https://tc39.github.io/ecma262/#sec-string.prototype.replace
           function replace(searchValue, replaceValue) {
-            "use strict";
             var O = defined(this);
             var fn =
               searchValue == undefined ? undefined : searchValue[REPLACE];
@@ -2068,8 +2458,125 @@ module.exports = /******/ (function(modules) {
               ? fn.call(searchValue, O, replaceValue)
               : $replace.call(String(O), searchValue, replaceValue);
           },
-          $replace
+          // `RegExp.prototype[@@replace]` method
+          // https://tc39.github.io/ecma262/#sec-regexp.prototype-@@replace
+          function(regexp, replaceValue) {
+            var res = maybeCallNative($replace, regexp, this, replaceValue);
+            if (res.done) return res.value;
+
+            var rx = anObject(regexp);
+            var S = String(this);
+            var functionalReplace = typeof replaceValue === "function";
+            if (!functionalReplace) replaceValue = String(replaceValue);
+            var global = rx.global;
+            if (global) {
+              var fullUnicode = rx.unicode;
+              rx.lastIndex = 0;
+            }
+            var results = [];
+            while (true) {
+              var result = regExpExec(rx, S);
+              if (result === null) break;
+              results.push(result);
+              if (!global) break;
+              var matchStr = String(result[0]);
+              if (matchStr === "")
+                rx.lastIndex = advanceStringIndex(
+                  S,
+                  toLength(rx.lastIndex),
+                  fullUnicode
+                );
+            }
+            var accumulatedResult = "";
+            var nextSourcePosition = 0;
+            for (var i = 0; i < results.length; i++) {
+              result = results[i];
+              var matched = String(result[0]);
+              var position = max(min(toInteger(result.index), S.length), 0);
+              var captures = [];
+              // NOTE: This is equivalent to
+              //   captures = result.slice(1).map(maybeToString)
+              // but for some reason `nativeSlice.call(result, 1, result.length)` (called in
+              // the slice polyfill when slicing native arrays) "doesn't work" in safari 9 and
+              // causes a crash (https://pastebin.com/N21QzeQA) when trying to debug it.
+              for (var j = 1; j < result.length; j++)
+                captures.push(maybeToString(result[j]));
+              var namedCaptures = result.groups;
+              if (functionalReplace) {
+                var replacerArgs = [matched].concat(captures, position, S);
+                if (namedCaptures !== undefined)
+                  replacerArgs.push(namedCaptures);
+                var replacement = String(
+                  replaceValue.apply(undefined, replacerArgs)
+                );
+              } else {
+                replacement = getSubstitution(
+                  matched,
+                  S,
+                  position,
+                  captures,
+                  namedCaptures,
+                  replaceValue
+                );
+              }
+              if (position >= nextSourcePosition) {
+                accumulatedResult +=
+                  S.slice(nextSourcePosition, position) + replacement;
+                nextSourcePosition = position + matched.length;
+              }
+            }
+            return accumulatedResult + S.slice(nextSourcePosition);
+          }
         ];
+
+        // https://tc39.github.io/ecma262/#sec-getsubstitution
+        function getSubstitution(
+          matched,
+          str,
+          position,
+          captures,
+          namedCaptures,
+          replacement
+        ) {
+          var tailPos = position + matched.length;
+          var m = captures.length;
+          var symbols = SUBSTITUTION_SYMBOLS_NO_NAMED;
+          if (namedCaptures !== undefined) {
+            namedCaptures = toObject(namedCaptures);
+            symbols = SUBSTITUTION_SYMBOLS;
+          }
+          return $replace.call(replacement, symbols, function(match, ch) {
+            var capture;
+            switch (ch.charAt(0)) {
+              case "$":
+                return "$";
+              case "&":
+                return matched;
+              case "`":
+                return str.slice(0, position);
+              case "'":
+                return str.slice(tailPos);
+              case "<":
+                capture = namedCaptures[ch.slice(1, -1)];
+                break;
+              default:
+                // \d\d?
+                var n = +ch;
+                if (n === 0) return match;
+                if (n > m) {
+                  var f = floor(n / 10);
+                  if (f === 0) return match;
+                  if (f <= m)
+                    return captures[f - 1] === undefined
+                      ? ch.charAt(1)
+                      : captures[f - 1] + ch.charAt(1);
+                  return match;
+                }
+                capture = captures[n - 1];
+            }
+            return capture === undefined ? "" : capture;
+          });
+        }
       });
 
       /***/
@@ -2218,6 +2725,24 @@ module.exports = /******/ (function(modules) {
               if (!proto[key]) redefine(proto, key, $iterators[key], true);
         }
       }
+
+      /***/
+    },
+
+    /***/ b0c5: /***/ function(module, exports, __webpack_require__) {
+      "use strict";
+
+      var regexpExec = __webpack_require__("520a");
+      __webpack_require__("5ca1")(
+        {
+          target: "RegExp",
+          proto: true,
+          forced: regexpExec !== /./.exec
+        },
+        {
+          exec: regexpExec
+        }
+      );
 
       /***/
     },
@@ -2569,6 +3094,21 @@ module.exports = /******/ (function(modules) {
       /***/
     },
 
+    /***/ f1ae: /***/ function(module, exports, __webpack_require__) {
+      "use strict";
+
+      var $defineProperty = __webpack_require__("86cc");
+      var createDesc = __webpack_require__("4630");
+
+      module.exports = function(object, index, value) {
+        if (index in object)
+          $defineProperty.f(object, index, createDesc(0, value));
+        else object[index] = value;
+      };
+
+      /***/
+    },
+
     /***/ f605: /***/ function(module, exports) {
       module.exports = function(it, Constructor, name, forbiddenField) {
         if (
@@ -2579,6 +3119,61 @@ module.exports = /******/ (function(modules) {
         }
         return it;
       };
+
+      /***/
+    },
+
+    /***/ f6fd: /***/ function(module, exports) {
+      // document.currentScript polyfill by Adam Miller
+
+      // MIT license
+
+      (function(document) {
+        var currentScript = "currentScript",
+          scripts = document.getElementsByTagName("script"); // Live NodeList collection
+
+        // If browser needs currentScript polyfill, add get currentScript() to the document object
+        if (!(currentScript in document)) {
+          Object.defineProperty(document, currentScript, {
+            get: function() {
+              // IE 6-10 supports script readyState
+              // IE 10+ support stack trace
+              try {
+                throw new Error();
+              } catch (err) {
+                // Find the second match for the "at" string to get file src url from stack.
+                // Specifically works with the format of stack traces in IE.
+                var i,
+                  res = (/.*at [^\(]*\((.*):.+:.+\)$/gi.exec(err.stack) || [
+                    false
+                  ])[1];
+
+                // For all scripts on the page, if src matches or if ready state is interactive, return the script tag
+                for (i in scripts) {
+                  if (
+                    scripts[i].src == res ||
+                    scripts[i].readyState == "interactive"
+                  ) {
+                    return scripts[i];
+                  }
+                }
+
+                // If no match, return null
+                return null;
+              }
+            }
+          });
+        }
+      })(document);
+
+      /***/
+    },
+
+    /***/ fa5b: /***/ function(module, exports, __webpack_require__) {
+      module.exports = __webpack_require__("5537")(
+        "native-function-to-string",
+        Function.toString
+      );
 
       /***/
     },
@@ -2596,12 +3191,92 @@ module.exports = /******/ (function(modules) {
       __webpack_require__
     ) {
       "use strict";
+      // ESM COMPAT FLAG
       __webpack_require__.r(__webpack_exports__);
+
+      // EXPORTS
+      __webpack_require__.d(__webpack_exports__, "withEvents", function() {
+        return /* reexport */ main_withEvents;
+      });
+      __webpack_require__.d(__webpack_exports__, "withSelfEvents", function() {
+        return /* reexport */ main_withSelfEvents;
+      });
+      __webpack_require__.d(__webpack_exports__, "asControl", function() {
+        return /* reexport */ asControl;
+      });
+      __webpack_require__.d(__webpack_exports__, "asLayer", function() {
+        return /* reexport */ asLayer;
+      });
+      __webpack_require__.d(__webpack_exports__, "$helpers", function() {
+        return /* reexport */ $helpers;
+      });
+      __webpack_require__.d(__webpack_exports__, "MglMap", function() {
+        return /* reexport */ MglMap;
+      });
+      __webpack_require__.d(
+        __webpack_exports__,
+        "MglNavigationControl",
+        function() {
+          return /* reexport */ MglNavigationControl;
+        }
+      );
+      __webpack_require__.d(
+        __webpack_exports__,
+        "MglGeolocateControl",
+        function() {
+          return /* reexport */ MglGeolocateControl;
+        }
+      );
+      __webpack_require__.d(
+        __webpack_exports__,
+        "MglFullscreenControl",
+        function() {
+          return /* reexport */ MglFullscreenControl;
+        }
+      );
+      __webpack_require__.d(
+        __webpack_exports__,
+        "MglAttributionControl",
+        function() {
+          return /* reexport */ MglAttributionControl;
+        }
+      );
+      __webpack_require__.d(__webpack_exports__, "MglScaleControl", function() {
+        return /* reexport */ MglScaleControl;
+      });
+      __webpack_require__.d(__webpack_exports__, "MglGeojsonLayer", function() {
+        return /* reexport */ MglGeojsonLayer;
+      });
+      __webpack_require__.d(__webpack_exports__, "MglImageLayer", function() {
+        return /* reexport */ MglImageLayer;
+      });
+      __webpack_require__.d(__webpack_exports__, "MglCanvasLayer", function() {
+        return /* reexport */ MglCanvasLayer;
+      });
+      __webpack_require__.d(__webpack_exports__, "MglVideoLayer", function() {
+        return /* reexport */ MglVideoLayer;
+      });
+      __webpack_require__.d(__webpack_exports__, "MglVectorLayer", function() {
+        return /* reexport */ MglVectorLayer;
+      });
+      __webpack_require__.d(__webpack_exports__, "MglRasterLayer", function() {
+        return /* reexport */ MglRasterLayer;
+      });
+      __webpack_require__.d(__webpack_exports__, "MglMarker", function() {
+        return /* reexport */ MglMarker;
+      });
+      __webpack_require__.d(__webpack_exports__, "MglPopup", function() {
+        return /* reexport */ MglPopup;
+      });
 
       // CONCATENATED MODULE: ./node_modules/@vue/cli-service/lib/commands/build/setPublicPath.js
       // This file is imported into lib/wc client bundles.
 
       if (typeof window !== "undefined") {
+        if (true) {
+          __webpack_require__("f6fd");
+        }
+
         var setPublicPath_i;
         if (
           (setPublicPath_i = window.document.currentScript) &&
@@ -2616,7 +3291,7 @@ module.exports = /******/ (function(modules) {
       // Indicate to webpack that this file can be concatenated
       /* harmony default export */ var setPublicPath = null;
 
-      // CONCATENATED MODULE: ./node_modules/cache-loader/dist/cjs.js?{"cacheDirectory":"node_modules/.cache/vue-loader","cacheIdentifier":"47f5d000-vue-loader-template"}!./node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!./node_modules/cache-loader/dist/cjs.js??ref--0-0!./node_modules/vue-loader/lib??vue-loader-options!./src/components/map/GlMap.vue?vue&type=template&id=b8a4f864&
+      // CONCATENATED MODULE: ./node_modules/cache-loader/dist/cjs.js?{"cacheDirectory":"node_modules/.cache/vue-loader","cacheIdentifier":"38c5cec0-vue-loader-template"}!./node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!./node_modules/cache-loader/dist/cjs.js??ref--0-0!./node_modules/vue-loader/lib??vue-loader-options!./src/components/map/GlMap.vue?vue&type=template&id=e5d954b4&
       var render = function() {
         var _vm = this;
         var _h = _vm.$createElement;
@@ -2637,7 +3312,10 @@ module.exports = /******/ (function(modules) {
         }
       ];
 
-      // CONCATENATED MODULE: ./src/components/map/GlMap.vue?vue&type=template&id=b8a4f864&
+      // CONCATENATED MODULE: ./src/components/map/GlMap.vue?vue&type=template&id=e5d954b4&
+
+      // EXTERNAL MODULE: ./node_modules/core-js/modules/es7.object.get-own-property-descriptors.js
+      var es7_object_get_own_property_descriptors = __webpack_require__("8e6e");
 
       // EXTERNAL MODULE: ./node_modules/core-js/modules/web.dom.iterable.js
       var web_dom_iterable = __webpack_require__("ac6a");
@@ -2666,29 +3344,45 @@ module.exports = /******/ (function(modules) {
 
         return obj;
       }
-      // CONCATENATED MODULE: ./node_modules/@babel/runtime/helpers/esm/objectSpread.js
+      // CONCATENATED MODULE: ./src/lib/withEvents.js
+
+      function ownKeys(object, enumerableOnly) {
+        var keys = Object.keys(object);
+        if (Object.getOwnPropertySymbols) {
+          var symbols = Object.getOwnPropertySymbols(object);
+          if (enumerableOnly)
+            symbols = symbols.filter(function(sym) {
+              return Object.getOwnPropertyDescriptor(object, sym).enumerable;
+            });
+          keys.push.apply(keys, symbols);
+        }
+        return keys;
+      }
 
       function _objectSpread(target) {
         for (var i = 1; i < arguments.length; i++) {
           var source = arguments[i] != null ? arguments[i] : {};
-          var ownKeys = Object.keys(source);
-
-          if (typeof Object.getOwnPropertySymbols === "function") {
-            ownKeys = ownKeys.concat(
-              Object.getOwnPropertySymbols(source).filter(function(sym) {
-                return Object.getOwnPropertyDescriptor(source, sym).enumerable;
-              })
+          if (i % 2) {
+            ownKeys(Object(source), true).forEach(function(key) {
+              _defineProperty(target, key, source[key]);
+            });
+          } else if (Object.getOwnPropertyDescriptors) {
+            Object.defineProperties(
+              target,
+              Object.getOwnPropertyDescriptors(source)
             );
+          } else {
+            ownKeys(Object(source)).forEach(function(key) {
+              Object.defineProperty(
+                target,
+                key,
+                Object.getOwnPropertyDescriptor(source, key)
+              );
+            });
           }
-
-          ownKeys.forEach(function(key) {
-            _defineProperty(target, key, source[key]);
-          });
         }
-
         return target;
       }
-      // CONCATENATED MODULE: ./src/lib/withEvents.js
 
       /* harmony default export */ var withEvents = {
         methods: {
@@ -2902,7 +3596,7 @@ module.exports = /******/ (function(modules) {
           required: true
         },
         hash: {
-          type: Boolean,
+          type: [Boolean, String],
           default: false
         },
         interactive: {
@@ -3017,8 +3711,12 @@ module.exports = /******/ (function(modules) {
           type: Number,
           default: 0
         },
-        initialBounds: {
+        bounds: {
           type: [Object, Array],
+          default: undefined
+        },
+        fitBoundsOptions: {
+          type: Object,
           default: undefined
         },
         renderWorldCopies: {
@@ -3153,6 +3851,46 @@ module.exports = /******/ (function(modules) {
       };
       // CONCATENATED MODULE: ./src/components/map/mixins/withPrivateMethods.js
 
+      function withPrivateMethods_ownKeys(object, enumerableOnly) {
+        var keys = Object.keys(object);
+        if (Object.getOwnPropertySymbols) {
+          var symbols = Object.getOwnPropertySymbols(object);
+          if (enumerableOnly)
+            symbols = symbols.filter(function(sym) {
+              return Object.getOwnPropertyDescriptor(object, sym).enumerable;
+            });
+          keys.push.apply(keys, symbols);
+        }
+        return keys;
+      }
+
+      function withPrivateMethods_objectSpread(target) {
+        for (var i = 1; i < arguments.length; i++) {
+          var source = arguments[i] != null ? arguments[i] : {};
+          if (i % 2) {
+            withPrivateMethods_ownKeys(Object(source), true).forEach(function(
+              key
+            ) {
+              _defineProperty(target, key, source[key]);
+            });
+          } else if (Object.getOwnPropertyDescriptors) {
+            Object.defineProperties(
+              target,
+              Object.getOwnPropertyDescriptors(source)
+            );
+          } else {
+            withPrivateMethods_ownKeys(Object(source)).forEach(function(key) {
+              Object.defineProperty(
+                target,
+                key,
+                Object.getOwnPropertyDescriptor(source, key)
+              );
+            });
+          }
+        }
+        return target;
+      }
+
       /* harmony default export */ var withPrivateMethods = {
         methods: {
           $_updateSyncedPropsFabric: function $_updateSyncedPropsFabric(
@@ -3189,8 +3927,20 @@ module.exports = /******/ (function(modules) {
               {
                 events: ["pitch"],
                 prop: "pitch",
-                getter: this.map.getPitch.bind(this.map) // TODO: make 'bounds' synced prop
-                // { events: ['moveend', 'zoomend', 'rotate', 'pitch'], prop: 'bounds', getter: this.map.getBounds.bind(this.map) }
+                getter: this.map.getPitch.bind(this.map)
+              },
+              {
+                events: ["moveend", "zoomend", "rotate", "pitch"],
+                prop: "bounds",
+                getter: function getter() {
+                  var newBounds = _this2.map.getBounds();
+
+                  if (_this2.$props.bounds instanceof Array) {
+                    newBounds = newBounds.toArray();
+                  }
+
+                  return newBounds;
+                }
               }
             ];
             syncedProps.forEach(function(_ref) {
@@ -3216,10 +3966,14 @@ module.exports = /******/ (function(modules) {
                 if (_this3.accessToken)
                   _this3.mapbox.accessToken = _this3.accessToken;
                 var map = new _this3.mapbox.Map(
-                  _objectSpread({}, _this3._props, {
-                    container: _this3.$refs.container,
-                    style: _this3.mapStyle
-                  })
+                  withPrivateMethods_objectSpread(
+                    withPrivateMethods_objectSpread({}, _this3._props),
+                    {},
+                    {
+                      container: _this3.$refs.container,
+                      style: _this3.mapStyle
+                    }
+                  )
                 );
                 map.on("load", function() {
                   return resolve(map);
@@ -3261,17 +4015,60 @@ module.exports = /******/ (function(modules) {
 
       // CONCATENATED MODULE: ./src/components/map/mixins/withAsyncActions.js
 
+      function withAsyncActions_ownKeys(object, enumerableOnly) {
+        var keys = Object.keys(object);
+        if (Object.getOwnPropertySymbols) {
+          var symbols = Object.getOwnPropertySymbols(object);
+          if (enumerableOnly)
+            symbols = symbols.filter(function(sym) {
+              return Object.getOwnPropertyDescriptor(object, sym).enumerable;
+            });
+          keys.push.apply(keys, symbols);
+        }
+        return keys;
+      }
+
+      function withAsyncActions_objectSpread(target) {
+        for (var i = 1; i < arguments.length; i++) {
+          var source = arguments[i] != null ? arguments[i] : {};
+          if (i % 2) {
+            withAsyncActions_ownKeys(Object(source), true).forEach(function(
+              key
+            ) {
+              _defineProperty(target, key, source[key]);
+            });
+          } else if (Object.getOwnPropertyDescriptors) {
+            Object.defineProperties(
+              target,
+              Object.getOwnPropertyDescriptors(source)
+            );
+          } else {
+            withAsyncActions_ownKeys(Object(source)).forEach(function(key) {
+              Object.defineProperty(
+                target,
+                key,
+                Object.getOwnPropertyDescriptor(source, key)
+              );
+            });
+          }
+        }
+        return target;
+      }
+
       /* harmony default export */ var withAsyncActions = {
         created: function created() {
           this.actions = {};
         },
         methods: {
           $_registerAsyncActions: function $_registerAsyncActions(map) {
-            this.actions = _objectSpread(
-              {},
-              external_commonjs_map_promisified_commonjs2_map_promisified_amd_map_promisified_root_map_promisified_default()(
-                map
+            this.actions = withAsyncActions_objectSpread(
+              withAsyncActions_objectSpread(
+                {},
+                external_commonjs_map_promisified_commonjs2_map_promisified_amd_map_promisified_root_map_promisified_default()(
+                  map
+                )
               ),
+              {},
               {
                 stop: function stop() {
                   var _this = this;
@@ -3295,6 +4092,48 @@ module.exports = /******/ (function(modules) {
       };
       // CONCATENATED MODULE: ./node_modules/cache-loader/dist/cjs.js??ref--12-0!./node_modules/thread-loader/dist/cjs.js!./node_modules/babel-loader/lib!./node_modules/cache-loader/dist/cjs.js??ref--0-0!./node_modules/vue-loader/lib??vue-loader-options!./src/components/map/GlMap.vue?vue&type=script&lang=js&
 
+      function GlMapvue_type_script_lang_js_ownKeys(object, enumerableOnly) {
+        var keys = Object.keys(object);
+        if (Object.getOwnPropertySymbols) {
+          var symbols = Object.getOwnPropertySymbols(object);
+          if (enumerableOnly)
+            symbols = symbols.filter(function(sym) {
+              return Object.getOwnPropertyDescriptor(object, sym).enumerable;
+            });
+          keys.push.apply(keys, symbols);
+        }
+        return keys;
+      }
+
+      function GlMapvue_type_script_lang_js_objectSpread(target) {
+        for (var i = 1; i < arguments.length; i++) {
+          var source = arguments[i] != null ? arguments[i] : {};
+          if (i % 2) {
+            GlMapvue_type_script_lang_js_ownKeys(Object(source), true).forEach(
+              function(key) {
+                _defineProperty(target, key, source[key]);
+              }
+            );
+          } else if (Object.getOwnPropertyDescriptors) {
+            Object.defineProperties(
+              target,
+              Object.getOwnPropertyDescriptors(source)
+            );
+          } else {
+            GlMapvue_type_script_lang_js_ownKeys(Object(source)).forEach(
+              function(key) {
+                Object.defineProperty(
+                  target,
+                  key,
+                  Object.getOwnPropertyDescriptor(source, key)
+                );
+              }
+            );
+          }
+        }
+        return target;
+      }
+
       //
       //
       //
@@ -3311,7 +4150,7 @@ module.exports = /******/ (function(modules) {
           withPrivateMethods,
           withEvents
         ],
-        props: _objectSpread(
+        props: GlMapvue_type_script_lang_js_objectSpread(
           {
             mapboxGl: {
               type: Object,
@@ -3349,10 +4188,6 @@ module.exports = /******/ (function(modules) {
           version: function version() {
             return this.map ? this.map.version : null;
           },
-          // TODO: make 'bounds' synced prop
-          bounds: function bounds() {
-            return this.map ? this.map.getBounds() : null;
-          },
           isStyleLoaded: function isStyleLoaded() {
             return this.map ? this.map.isStyleLoaded() : false;
           },
@@ -3387,7 +4222,10 @@ module.exports = /******/ (function(modules) {
           this.$_loadMap().then(function(map) {
             _this.map = map;
 
-            if (_this.RTLTextPluginUrl !== undefined) {
+            if (
+              _this.RTLTextPluginUrl !== undefined &&
+              _this.mapbox.getRTLTextPluginStatus() !== "loaded"
+            ) {
               _this.mapbox.setRTLTextPlugin(
                 _this.RTLTextPluginUrl,
                 _this.$_RTLTextPluginError
@@ -3494,7 +4332,11 @@ module.exports = /******/ (function(modules) {
         } else if (injectStyles) {
           hook = shadowMode
             ? function() {
-                injectStyles.call(this, this.$root.$options.shadowRoot);
+                injectStyles.call(
+                  this,
+                  (options.functional ? this.parent : this).$root.$options
+                    .shadowRoot
+                );
               }
             : injectStyles;
         }
@@ -3504,7 +4346,7 @@ module.exports = /******/ (function(modules) {
             // for template-only hot-reload because in that case the render fn doesn't
             // go through the normalizer
             options._injectStyles = hook;
-            // register for functioal component in vue file
+            // register for functional component in vue file
             var originalRender = options.render;
             options.render = function renderWithStyleInjection(h, context) {
               hook.call(context);
@@ -3539,9 +4381,46 @@ module.exports = /******/ (function(modules) {
         null
       );
 
-      component.options.__file = "GlMap.vue";
       /* harmony default export */ var GlMap = component.exports;
       // CONCATENATED MODULE: ./src/components/UI/withSelfEvents.js
+
+      function withSelfEvents_ownKeys(object, enumerableOnly) {
+        var keys = Object.keys(object);
+        if (Object.getOwnPropertySymbols) {
+          var symbols = Object.getOwnPropertySymbols(object);
+          if (enumerableOnly)
+            symbols = symbols.filter(function(sym) {
+              return Object.getOwnPropertyDescriptor(object, sym).enumerable;
+            });
+          keys.push.apply(keys, symbols);
+        }
+        return keys;
+      }
+
+      function withSelfEvents_objectSpread(target) {
+        for (var i = 1; i < arguments.length; i++) {
+          var source = arguments[i] != null ? arguments[i] : {};
+          if (i % 2) {
+            withSelfEvents_ownKeys(Object(source), true).forEach(function(key) {
+              _defineProperty(target, key, source[key]);
+            });
+          } else if (Object.getOwnPropertyDescriptors) {
+            Object.defineProperties(
+              target,
+              Object.getOwnPropertyDescriptors(source)
+            );
+          } else {
+            withSelfEvents_ownKeys(Object(source)).forEach(function(key) {
+              Object.defineProperty(
+                target,
+                key,
+                Object.getOwnPropertyDescriptor(source, key)
+              );
+            });
+          }
+        }
+        return target;
+      }
 
       /* harmony default export */ var withSelfEvents = {
         methods: {
@@ -3552,7 +4431,7 @@ module.exports = /******/ (function(modules) {
                 : {};
             this.$_emitMapEvent(
               event,
-              _objectSpread(
+              withSelfEvents_objectSpread(
                 {
                   control: this.control
                 },
@@ -3758,8 +4637,8 @@ module.exports = /******/ (function(modules) {
           this.$_addControl();
         }
       };
-      // CONCATENATED MODULE: ./node_modules/cache-loader/dist/cjs.js?{"cacheDirectory":"node_modules/.cache/vue-loader","cacheIdentifier":"47f5d000-vue-loader-template"}!./node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!./node_modules/cache-loader/dist/cjs.js??ref--0-0!./node_modules/vue-loader/lib??vue-loader-options!./src/components/UI/Marker.vue?vue&type=template&id=63af2177&
-      var Markervue_type_template_id_63af2177_render = function() {
+      // CONCATENATED MODULE: ./node_modules/cache-loader/dist/cjs.js?{"cacheDirectory":"node_modules/.cache/vue-loader","cacheIdentifier":"38c5cec0-vue-loader-template"}!./node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!./node_modules/cache-loader/dist/cjs.js??ref--0-0!./node_modules/vue-loader/lib??vue-loader-options!./src/components/UI/Marker.vue?vue&type=template&id=74e34d5a&
+      var Markervue_type_template_id_74e34d5a_render = function() {
         var _vm = this;
         var _h = _vm.$createElement;
         var _c = _vm._self._c || _h;
@@ -3770,14 +4649,56 @@ module.exports = /******/ (function(modules) {
           2
         );
       };
-      var Markervue_type_template_id_63af2177_staticRenderFns = [];
+      var Markervue_type_template_id_74e34d5a_staticRenderFns = [];
 
-      // CONCATENATED MODULE: ./src/components/UI/Marker.vue?vue&type=template&id=63af2177&
+      // CONCATENATED MODULE: ./src/components/UI/Marker.vue?vue&type=template&id=74e34d5a&
 
       // EXTERNAL MODULE: ./node_modules/core-js/modules/es7.object.values.js
       var es7_object_values = __webpack_require__("8615");
 
       // CONCATENATED MODULE: ./node_modules/cache-loader/dist/cjs.js??ref--12-0!./node_modules/thread-loader/dist/cjs.js!./node_modules/babel-loader/lib!./node_modules/cache-loader/dist/cjs.js??ref--0-0!./node_modules/vue-loader/lib??vue-loader-options!./src/components/UI/Marker.vue?vue&type=script&lang=js&
+
+      function Markervue_type_script_lang_js_ownKeys(object, enumerableOnly) {
+        var keys = Object.keys(object);
+        if (Object.getOwnPropertySymbols) {
+          var symbols = Object.getOwnPropertySymbols(object);
+          if (enumerableOnly)
+            symbols = symbols.filter(function(sym) {
+              return Object.getOwnPropertyDescriptor(object, sym).enumerable;
+            });
+          keys.push.apply(keys, symbols);
+        }
+        return keys;
+      }
+
+      function Markervue_type_script_lang_js_objectSpread(target) {
+        for (var i = 1; i < arguments.length; i++) {
+          var source = arguments[i] != null ? arguments[i] : {};
+          if (i % 2) {
+            Markervue_type_script_lang_js_ownKeys(Object(source), true).forEach(
+              function(key) {
+                _defineProperty(target, key, source[key]);
+              }
+            );
+          } else if (Object.getOwnPropertyDescriptors) {
+            Object.defineProperties(
+              target,
+              Object.getOwnPropertyDescriptors(source)
+            );
+          } else {
+            Markervue_type_script_lang_js_ownKeys(Object(source)).forEach(
+              function(key) {
+                Object.defineProperty(
+                  target,
+                  key,
+                  Object.getOwnPropertyDescriptor(source, key)
+                );
+              }
+            );
+          }
+        }
+        return target;
+      }
 
       //
       //
@@ -3854,7 +4775,10 @@ module.exports = /******/ (function(modules) {
         mounted: function mounted() {
           var _this = this;
 
-          var markerOptions = _objectSpread({}, this.$props);
+          var markerOptions = Markervue_type_script_lang_js_objectSpread(
+            {},
+            this.$props
+          );
 
           if (this.$slots.marker) {
             markerOptions.element = this.$slots.marker[0].elm;
@@ -3930,18 +4854,17 @@ module.exports = /******/ (function(modules) {
 
       var Marker_component = normalizeComponent(
         UI_Markervue_type_script_lang_js_,
-        Markervue_type_template_id_63af2177_render,
-        Markervue_type_template_id_63af2177_staticRenderFns,
+        Markervue_type_template_id_74e34d5a_render,
+        Markervue_type_template_id_74e34d5a_staticRenderFns,
         false,
         null,
         null,
         null
       );
 
-      Marker_component.options.__file = "Marker.vue";
       /* harmony default export */ var Marker = Marker_component.exports;
-      // CONCATENATED MODULE: ./node_modules/cache-loader/dist/cjs.js?{"cacheDirectory":"node_modules/.cache/vue-loader","cacheIdentifier":"47f5d000-vue-loader-template"}!./node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!./node_modules/cache-loader/dist/cjs.js??ref--0-0!./node_modules/vue-loader/lib??vue-loader-options!./src/components/UI/Popup.vue?vue&type=template&id=6e79a273&
-      var Popupvue_type_template_id_6e79a273_render = function() {
+      // CONCATENATED MODULE: ./node_modules/cache-loader/dist/cjs.js?{"cacheDirectory":"node_modules/.cache/vue-loader","cacheIdentifier":"38c5cec0-vue-loader-template"}!./node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!./node_modules/cache-loader/dist/cjs.js??ref--0-0!./node_modules/vue-loader/lib??vue-loader-options!./src/components/UI/Popup.vue?vue&type=template&id=c6933d1e&
+      var Popupvue_type_template_id_c6933d1e_render = function() {
         var _vm = this;
         var _h = _vm.$createElement;
         var _c = _vm._self._c || _h;
@@ -3952,9 +4875,9 @@ module.exports = /******/ (function(modules) {
           2
         );
       };
-      var Popupvue_type_template_id_6e79a273_staticRenderFns = [];
+      var Popupvue_type_template_id_c6933d1e_staticRenderFns = [];
 
-      // CONCATENATED MODULE: ./src/components/UI/Popup.vue?vue&type=template&id=6e79a273&
+      // CONCATENATED MODULE: ./src/components/UI/Popup.vue?vue&type=template&id=c6933d1e&
 
       // CONCATENATED MODULE: ./node_modules/cache-loader/dist/cjs.js??ref--12-0!./node_modules/thread-loader/dist/cjs.js!./node_modules/babel-loader/lib!./node_modules/cache-loader/dist/cjs.js??ref--0-0!./node_modules/vue-loader/lib??vue-loader-options!./src/components/UI/Popup.vue?vue&type=script&lang=js&
 
@@ -4059,6 +4982,10 @@ module.exports = /******/ (function(modules) {
           showed: {
             type: Boolean,
             default: false
+          },
+          focusAfterOpen: {
+            type: Boolean,
+            default: true
           }
         },
         data: function data() {
@@ -4078,7 +5005,7 @@ module.exports = /******/ (function(modules) {
             },
             set: function set(value) {
               if (this.map && this.popup) {
-                if (value) {
+                if (!value) {
                   this.popup.remove();
                 } else {
                   this.popup.addTo(this.map);
@@ -4175,15 +5102,14 @@ module.exports = /******/ (function(modules) {
 
       var Popup_component = normalizeComponent(
         UI_Popupvue_type_script_lang_js_,
-        Popupvue_type_template_id_6e79a273_render,
-        Popupvue_type_template_id_6e79a273_staticRenderFns,
+        Popupvue_type_template_id_c6933d1e_render,
+        Popupvue_type_template_id_c6933d1e_staticRenderFns,
         false,
         null,
         null,
         null
       );
 
-      Popup_component.options.__file = "Popup.vue";
       /* harmony default export */ var Popup = Popup_component.exports;
       // EXTERNAL MODULE: ./node_modules/core-js/modules/es6.regexp.replace.js
       var es6_regexp_replace = __webpack_require__("a481");
@@ -4205,6 +5131,44 @@ module.exports = /******/ (function(modules) {
         "touchcancel"
       ];
       // CONCATENATED MODULE: ./src/components/layer/layerMixin.js
+
+      function layerMixin_ownKeys(object, enumerableOnly) {
+        var keys = Object.keys(object);
+        if (Object.getOwnPropertySymbols) {
+          var symbols = Object.getOwnPropertySymbols(object);
+          if (enumerableOnly)
+            symbols = symbols.filter(function(sym) {
+              return Object.getOwnPropertyDescriptor(object, sym).enumerable;
+            });
+          keys.push.apply(keys, symbols);
+        }
+        return keys;
+      }
+
+      function layerMixin_objectSpread(target) {
+        for (var i = 1; i < arguments.length; i++) {
+          var source = arguments[i] != null ? arguments[i] : {};
+          if (i % 2) {
+            layerMixin_ownKeys(Object(source), true).forEach(function(key) {
+              _defineProperty(target, key, source[key]);
+            });
+          } else if (Object.getOwnPropertyDescriptors) {
+            Object.defineProperties(
+              target,
+              Object.getOwnPropertyDescriptors(source)
+            );
+          } else {
+            layerMixin_ownKeys(Object(source)).forEach(function(key) {
+              Object.defineProperty(
+                target,
+                key,
+                Object.getOwnPropertyDescriptor(source, key)
+              );
+            });
+          }
+        }
+        return target;
+      }
 
       // import withRegistration from "../../lib/withRegistration";
 
@@ -4248,10 +5212,11 @@ module.exports = /******/ (function(modules) {
       };
       /* harmony default export */ var layerMixin = {
         mixins: [withEvents],
-        props: _objectSpread(
-          {},
-          mapboxSourceProps,
-          mapboxLayerStyleProps,
+        props: layerMixin_objectSpread(
+          layerMixin_objectSpread(
+            layerMixin_objectSpread({}, mapboxSourceProps),
+            mapboxLayerStyleProps
+          ),
           componentProps
         ),
         inject: ["mapbox", "map"],
@@ -4301,10 +5266,12 @@ module.exports = /******/ (function(modules) {
                 if (this.initial) return;
 
                 if (next) {
-                  var _arr = Object.keys(next);
-
-                  for (var _i = 0; _i < _arr.length; _i++) {
-                    var prop = _arr[_i];
+                  for (
+                    var _i = 0, _Object$keys = Object.keys(next);
+                    _i < _Object$keys.length;
+                    _i++
+                  ) {
+                    var prop = _Object$keys[_i];
                     this.map.setPaintProperty(this.layerId, prop, next[prop]);
                   }
                 }
@@ -4322,10 +5289,12 @@ module.exports = /******/ (function(modules) {
                 if (this.initial) return;
 
                 if (next) {
-                  var _arr2 = Object.keys(next);
-
-                  for (var _i2 = 0; _i2 < _arr2.length; _i2++) {
-                    var prop = _arr2[_i2];
+                  for (
+                    var _i2 = 0, _Object$keys2 = Object.keys(next);
+                    _i2 < _Object$keys2.length;
+                    _i2++
+                  ) {
+                    var prop = _Object$keys2[_i2];
                     this.map.setLayoutProperty(this.layerId, prop, next[prop]);
                   }
                 }
@@ -4431,6 +5400,44 @@ module.exports = /******/ (function(modules) {
         render: function render() {}
       };
       // CONCATENATED MODULE: ./src/components/layer/GeojsonLayer.js
+
+      function GeojsonLayer_ownKeys(object, enumerableOnly) {
+        var keys = Object.keys(object);
+        if (Object.getOwnPropertySymbols) {
+          var symbols = Object.getOwnPropertySymbols(object);
+          if (enumerableOnly)
+            symbols = symbols.filter(function(sym) {
+              return Object.getOwnPropertyDescriptor(object, sym).enumerable;
+            });
+          keys.push.apply(keys, symbols);
+        }
+        return keys;
+      }
+
+      function GeojsonLayer_objectSpread(target) {
+        for (var i = 1; i < arguments.length; i++) {
+          var source = arguments[i] != null ? arguments[i] : {};
+          if (i % 2) {
+            GeojsonLayer_ownKeys(Object(source), true).forEach(function(key) {
+              _defineProperty(target, key, source[key]);
+            });
+          } else if (Object.getOwnPropertyDescriptors) {
+            Object.defineProperties(
+              target,
+              Object.getOwnPropertyDescriptors(source)
+            );
+          } else {
+            GeojsonLayer_ownKeys(Object(source)).forEach(function(key) {
+              Object.defineProperty(
+                target,
+                key,
+                Object.getOwnPropertyDescriptor(source, key)
+              );
+            });
+          }
+        }
+        return target;
+      }
 
       /* harmony default export */ var GeojsonLayer = {
         name: "GeojsonLayer",
@@ -4584,7 +5591,7 @@ module.exports = /******/ (function(modules) {
             this.map.on("dataloading", this.$_watchSourceLoading);
 
             if (this.source) {
-              var source = _objectSpread(
+              var source = GeojsonLayer_objectSpread(
                 {
                   type: "geojson"
                 },
@@ -4620,7 +5627,7 @@ module.exports = /******/ (function(modules) {
               }
             }
 
-            var layer = _objectSpread(
+            var layer = GeojsonLayer_objectSpread(
               {
                 id: this.layerId,
                 source: this.sourceId
@@ -4669,6 +5676,44 @@ module.exports = /******/ (function(modules) {
       };
       // CONCATENATED MODULE: ./src/components/layer/ImageLayer.js
 
+      function ImageLayer_ownKeys(object, enumerableOnly) {
+        var keys = Object.keys(object);
+        if (Object.getOwnPropertySymbols) {
+          var symbols = Object.getOwnPropertySymbols(object);
+          if (enumerableOnly)
+            symbols = symbols.filter(function(sym) {
+              return Object.getOwnPropertyDescriptor(object, sym).enumerable;
+            });
+          keys.push.apply(keys, symbols);
+        }
+        return keys;
+      }
+
+      function ImageLayer_objectSpread(target) {
+        for (var i = 1; i < arguments.length; i++) {
+          var source = arguments[i] != null ? arguments[i] : {};
+          if (i % 2) {
+            ImageLayer_ownKeys(Object(source), true).forEach(function(key) {
+              _defineProperty(target, key, source[key]);
+            });
+          } else if (Object.getOwnPropertyDescriptors) {
+            Object.defineProperties(
+              target,
+              Object.getOwnPropertyDescriptors(source)
+            );
+          } else {
+            ImageLayer_ownKeys(Object(source)).forEach(function(key) {
+              Object.defineProperty(
+                target,
+                key,
+                Object.getOwnPropertyDescriptor(source, key)
+              );
+            });
+          }
+        }
+        return target;
+      }
+
       /* harmony default export */ var ImageLayer = {
         name: "ImageLayer",
         mixins: [layerMixin],
@@ -4714,7 +5759,7 @@ module.exports = /******/ (function(modules) {
         },
         methods: {
           $_deferredMount: function $_deferredMount() {
-            var source = _objectSpread(
+            var source = ImageLayer_objectSpread(
               {
                 type: "image"
               },
@@ -4750,7 +5795,7 @@ module.exports = /******/ (function(modules) {
               }
             }
 
-            var layer = _objectSpread(
+            var layer = ImageLayer_objectSpread(
               {
                 id: this.layerId,
                 source: this.sourceId,
@@ -4767,6 +5812,44 @@ module.exports = /******/ (function(modules) {
         }
       };
       // CONCATENATED MODULE: ./src/components/layer/CanvasLayer.js
+
+      function CanvasLayer_ownKeys(object, enumerableOnly) {
+        var keys = Object.keys(object);
+        if (Object.getOwnPropertySymbols) {
+          var symbols = Object.getOwnPropertySymbols(object);
+          if (enumerableOnly)
+            symbols = symbols.filter(function(sym) {
+              return Object.getOwnPropertyDescriptor(object, sym).enumerable;
+            });
+          keys.push.apply(keys, symbols);
+        }
+        return keys;
+      }
+
+      function CanvasLayer_objectSpread(target) {
+        for (var i = 1; i < arguments.length; i++) {
+          var source = arguments[i] != null ? arguments[i] : {};
+          if (i % 2) {
+            CanvasLayer_ownKeys(Object(source), true).forEach(function(key) {
+              _defineProperty(target, key, source[key]);
+            });
+          } else if (Object.getOwnPropertyDescriptors) {
+            Object.defineProperties(
+              target,
+              Object.getOwnPropertyDescriptors(source)
+            );
+          } else {
+            CanvasLayer_ownKeys(Object(source)).forEach(function(key) {
+              Object.defineProperty(
+                target,
+                key,
+                Object.getOwnPropertyDescriptor(source, key)
+              );
+            });
+          }
+        }
+        return target;
+      }
 
       /* harmony default export */ var CanvasLayer = {
         name: "CanvasLayer",
@@ -4798,7 +5881,7 @@ module.exports = /******/ (function(modules) {
         },
         methods: {
           $_deferredMount: function $_deferredMount() {
-            var source = _objectSpread(
+            var source = CanvasLayer_objectSpread(
               {
                 type: "canvas"
               },
@@ -4834,7 +5917,7 @@ module.exports = /******/ (function(modules) {
               }
             }
 
-            var layer = _objectSpread(
+            var layer = CanvasLayer_objectSpread(
               {
                 id: this.layerId,
                 source: this.sourceId,
@@ -4852,6 +5935,44 @@ module.exports = /******/ (function(modules) {
         }
       };
       // CONCATENATED MODULE: ./src/components/layer/VideoLayer.js
+
+      function VideoLayer_ownKeys(object, enumerableOnly) {
+        var keys = Object.keys(object);
+        if (Object.getOwnPropertySymbols) {
+          var symbols = Object.getOwnPropertySymbols(object);
+          if (enumerableOnly)
+            symbols = symbols.filter(function(sym) {
+              return Object.getOwnPropertyDescriptor(object, sym).enumerable;
+            });
+          keys.push.apply(keys, symbols);
+        }
+        return keys;
+      }
+
+      function VideoLayer_objectSpread(target) {
+        for (var i = 1; i < arguments.length; i++) {
+          var source = arguments[i] != null ? arguments[i] : {};
+          if (i % 2) {
+            VideoLayer_ownKeys(Object(source), true).forEach(function(key) {
+              _defineProperty(target, key, source[key]);
+            });
+          } else if (Object.getOwnPropertyDescriptors) {
+            Object.defineProperties(
+              target,
+              Object.getOwnPropertyDescriptors(source)
+            );
+          } else {
+            VideoLayer_ownKeys(Object(source)).forEach(function(key) {
+              Object.defineProperty(
+                target,
+                key,
+                Object.getOwnPropertyDescriptor(source, key)
+              );
+            });
+          }
+        }
+        return target;
+      }
 
       /* harmony default export */ var VideoLayer = {
         name: "VideoLayer",
@@ -4873,7 +5994,7 @@ module.exports = /******/ (function(modules) {
         },
         methods: {
           $_deferredMount: function $_deferredMount() {
-            var source = _objectSpread(
+            var source = VideoLayer_objectSpread(
               {
                 type: "video"
               },
@@ -4909,7 +6030,7 @@ module.exports = /******/ (function(modules) {
               }
             }
 
-            var layer = _objectSpread(
+            var layer = VideoLayer_objectSpread(
               {
                 id: this.layerId,
                 source: this.sourceId,
@@ -4926,6 +6047,44 @@ module.exports = /******/ (function(modules) {
         }
       };
       // CONCATENATED MODULE: ./src/components/layer/VectorLayer.js
+
+      function VectorLayer_ownKeys(object, enumerableOnly) {
+        var keys = Object.keys(object);
+        if (Object.getOwnPropertySymbols) {
+          var symbols = Object.getOwnPropertySymbols(object);
+          if (enumerableOnly)
+            symbols = symbols.filter(function(sym) {
+              return Object.getOwnPropertyDescriptor(object, sym).enumerable;
+            });
+          keys.push.apply(keys, symbols);
+        }
+        return keys;
+      }
+
+      function VectorLayer_objectSpread(target) {
+        for (var i = 1; i < arguments.length; i++) {
+          var source = arguments[i] != null ? arguments[i] : {};
+          if (i % 2) {
+            VectorLayer_ownKeys(Object(source), true).forEach(function(key) {
+              _defineProperty(target, key, source[key]);
+            });
+          } else if (Object.getOwnPropertyDescriptors) {
+            Object.defineProperties(
+              target,
+              Object.getOwnPropertyDescriptors(source)
+            );
+          } else {
+            VectorLayer_ownKeys(Object(source)).forEach(function(key) {
+              Object.defineProperty(
+                target,
+                key,
+                Object.getOwnPropertyDescriptor(source, key)
+              );
+            });
+          }
+        }
+        return target;
+      }
 
       /* harmony default export */ var VectorLayer = {
         name: "VectorLayer",
@@ -4971,7 +6130,7 @@ module.exports = /******/ (function(modules) {
         },
         methods: {
           $_deferredMount: function $_deferredMount() {
-            var source = _objectSpread(
+            var source = VectorLayer_objectSpread(
               {
                 type: "vector"
               },
@@ -5008,7 +6167,7 @@ module.exports = /******/ (function(modules) {
               }
             }
 
-            var layer = _objectSpread(
+            var layer = VectorLayer_objectSpread(
               {
                 id: this.layerId,
                 source: this.sourceId
@@ -5045,6 +6204,44 @@ module.exports = /******/ (function(modules) {
       };
       // CONCATENATED MODULE: ./src/components/layer/RasterLayer.js
 
+      function RasterLayer_ownKeys(object, enumerableOnly) {
+        var keys = Object.keys(object);
+        if (Object.getOwnPropertySymbols) {
+          var symbols = Object.getOwnPropertySymbols(object);
+          if (enumerableOnly)
+            symbols = symbols.filter(function(sym) {
+              return Object.getOwnPropertyDescriptor(object, sym).enumerable;
+            });
+          keys.push.apply(keys, symbols);
+        }
+        return keys;
+      }
+
+      function RasterLayer_objectSpread(target) {
+        for (var i = 1; i < arguments.length; i++) {
+          var source = arguments[i] != null ? arguments[i] : {};
+          if (i % 2) {
+            RasterLayer_ownKeys(Object(source), true).forEach(function(key) {
+              _defineProperty(target, key, source[key]);
+            });
+          } else if (Object.getOwnPropertyDescriptors) {
+            Object.defineProperties(
+              target,
+              Object.getOwnPropertyDescriptors(source)
+            );
+          } else {
+            RasterLayer_ownKeys(Object(source)).forEach(function(key) {
+              Object.defineProperty(
+                target,
+                key,
+                Object.getOwnPropertyDescriptor(source, key)
+              );
+            });
+          }
+        }
+        return target;
+      }
+
       /* harmony default export */ var RasterLayer = {
         name: "RasterLayer",
         mixins: [layerMixin],
@@ -5053,7 +6250,7 @@ module.exports = /******/ (function(modules) {
         },
         methods: {
           $_deferredMount: function $_deferredMount() {
-            var source = _objectSpread(
+            var source = RasterLayer_objectSpread(
               {
                 type: "raster"
               },
@@ -5090,7 +6287,7 @@ module.exports = /******/ (function(modules) {
               }
             }
 
-            var layer = _objectSpread(
+            var layer = RasterLayer_objectSpread(
               {
                 id: this.layerId,
                 type: "raster",
@@ -5134,139 +6331,6 @@ module.exports = /******/ (function(modules) {
       var MglPopup = Popup;
       /* harmony default export */ var main = GlMap;
       // CONCATENATED MODULE: ./node_modules/@vue/cli-service/lib/commands/build/entry-lib.js
-      /* concated harmony reexport withEvents */ __webpack_require__.d(
-        __webpack_exports__,
-        "withEvents",
-        function() {
-          return main_withEvents;
-        }
-      );
-      /* concated harmony reexport withSelfEvents */ __webpack_require__.d(
-        __webpack_exports__,
-        "withSelfEvents",
-        function() {
-          return main_withSelfEvents;
-        }
-      );
-      /* concated harmony reexport asControl */ __webpack_require__.d(
-        __webpack_exports__,
-        "asControl",
-        function() {
-          return asControl;
-        }
-      );
-      /* concated harmony reexport asLayer */ __webpack_require__.d(
-        __webpack_exports__,
-        "asLayer",
-        function() {
-          return asLayer;
-        }
-      );
-      /* concated harmony reexport $helpers */ __webpack_require__.d(
-        __webpack_exports__,
-        "$helpers",
-        function() {
-          return $helpers;
-        }
-      );
-      /* concated harmony reexport MglMap */ __webpack_require__.d(
-        __webpack_exports__,
-        "MglMap",
-        function() {
-          return MglMap;
-        }
-      );
-      /* concated harmony reexport MglNavigationControl */ __webpack_require__.d(
-        __webpack_exports__,
-        "MglNavigationControl",
-        function() {
-          return MglNavigationControl;
-        }
-      );
-      /* concated harmony reexport MglGeolocateControl */ __webpack_require__.d(
-        __webpack_exports__,
-        "MglGeolocateControl",
-        function() {
-          return MglGeolocateControl;
-        }
-      );
-      /* concated harmony reexport MglFullscreenControl */ __webpack_require__.d(
-        __webpack_exports__,
-        "MglFullscreenControl",
-        function() {
-          return MglFullscreenControl;
-        }
-      );
-      /* concated harmony reexport MglAttributionControl */ __webpack_require__.d(
-        __webpack_exports__,
-        "MglAttributionControl",
-        function() {
-          return MglAttributionControl;
-        }
-      );
-      /* concated harmony reexport MglScaleControl */ __webpack_require__.d(
-        __webpack_exports__,
-        "MglScaleControl",
-        function() {
-          return MglScaleControl;
-        }
-      );
-      /* concated harmony reexport MglGeojsonLayer */ __webpack_require__.d(
-        __webpack_exports__,
-        "MglGeojsonLayer",
-        function() {
-          return MglGeojsonLayer;
-        }
-      );
-      /* concated harmony reexport MglImageLayer */ __webpack_require__.d(
-        __webpack_exports__,
-        "MglImageLayer",
-        function() {
-          return MglImageLayer;
-        }
-      );
-      /* concated harmony reexport MglCanvasLayer */ __webpack_require__.d(
-        __webpack_exports__,
-        "MglCanvasLayer",
-        function() {
-          return MglCanvasLayer;
-        }
-      );
-      /* concated harmony reexport MglVideoLayer */ __webpack_require__.d(
-        __webpack_exports__,
-        "MglVideoLayer",
-        function() {
-          return MglVideoLayer;
-        }
-      );
-      /* concated harmony reexport MglVectorLayer */ __webpack_require__.d(
-        __webpack_exports__,
-        "MglVectorLayer",
-        function() {
-          return MglVectorLayer;
-        }
-      );
-      /* concated harmony reexport MglRasterLayer */ __webpack_require__.d(
-        __webpack_exports__,
-        "MglRasterLayer",
-        function() {
-          return MglRasterLayer;
-        }
-      );
-      /* concated harmony reexport MglMarker */ __webpack_require__.d(
-        __webpack_exports__,
-        "MglMarker",
-        function() {
-          return MglMarker;
-        }
-      );
-      /* concated harmony reexport MglPopup */ __webpack_require__.d(
-        __webpack_exports__,
-        "MglPopup",
-        function() {
-          return MglPopup;
-        }
-      );
 
       /* harmony default export */ var entry_lib = (__webpack_exports__[
         "default"
